@@ -1,4 +1,4 @@
-**E2E Real-Time Data Pipeline with Kafka, Flink, Iceberg, Trino, MinIO, and Superset**
+**Real-Time Clickstream Pipeline (Kafka → Flink → Iceberg → Trino)**
 ======================================================================================
 
 ![Docker](https://img.shields.io/badge/Docker-Enabled-blue?logo=docker)
