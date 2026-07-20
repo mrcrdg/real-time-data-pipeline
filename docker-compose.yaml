@@ -1,12 +1,20 @@
+# docker-compose.yaml
 services:
   zookeeper:
     image: confluentinc/cp-zookeeper:7.2.1
     hostname: zookeeper
     container_name: zookeeper
+    restart: on-failure
     ports:
       - 2181:2181
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
+    healthcheck:
+      test: ["CMD-SHELL", "cub zk-ready localhost:2181 3"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
     networks:
       - iceberg_net
 
@@ -14,18 +22,20 @@ services:
     image: confluentinc/cp-server:7.2.1
     hostname: kafka
     container_name: broker
+    restart: on-failure
     depends_on:
-      - zookeeper
+      zookeeper:
+        condition: service_healthy
     ports:
       - 9092:9092
       - 29092:29092
     healthcheck:
-      test: ["CMD-SHELL", "sleep 1;"]
-      interval: 30s
+      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 15s
       timeout: 10s
-      retries: 5
+      retries: 10
+      start_period: 40s
     environment:
-      # Basic Kafka configurations
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
@@ -33,21 +43,16 @@ services:
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
-
-      # Logging settings
       KAFKA_LOG4J_LOGGERS: org.apache.zookeeper=ERROR,org.apache.kafka=ERROR,kafka=ERROR,kafka.cluster=ERROR,kafka.controller=ERROR,kafka.coordinator=ERROR,kafka.log=ERROR,kafka.server=ERROR,kafka.zookeeper=ERROR,state.change.logger=ERROR
       KAFKA_LOG4J_ROOT_LOGLEVEL: ERROR
-
-      # Metrics and telemetry configurations
       KAFKA_METRIC_REPORTERS: io.confluent.metrics.reporter.ConfluentMetricsReporter
       CONFLUENT_METRICS_REPORTER_BOOTSTRAP_SERVERS: broker:29092
       CONFLUENT_METRICS_ENABLE: 'false'
-      CONFLUENT_TELEMETRY_ENABLED: 'false'  # Ensure telemetry is fully disabled
+      CONFLUENT_TELEMETRY_ENABLED: 'false'
       KAFKA_CONFLUENT_BALANCER_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_CONFLUENT_SUPPORT_METRICS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_CONFLUENT_TELEMETRY_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_CONFLUENT_METADATA_TOPIC_REPLICATION_FACTOR: 1
-
     networks:
       - iceberg_net
 
@@ -55,8 +60,10 @@ services:
     image: confluentinc/cp-enterprise-control-center:7.2.1
     hostname: control-center
     container_name: control-center
+    profiles: ["ui"]
     depends_on:
-      - broker
+      broker:
+        condition: service_healthy
     ports:
       - 9021:9021
     environment:
@@ -73,20 +80,22 @@ services:
     container_name: clickstream-producer
     build:
       context: ./producer
+    restart: on-failure
     depends_on:
-      - broker
+      broker:
+        condition: service_healthy
     environment:
       KAFKA_BROKER: broker:29092
     networks:
       - iceberg_net
 
-  ## FLINK
   jobmanager:
     container_name: jobmanager
     image: flink:1.18.1-scala_2.12-java11
+    restart: on-failure
     ports:
       - 18081:18081
-    command: jobmanager   
+    command: jobmanager
     environment:
       - |
         FLINK_PROPERTIES=
@@ -95,22 +104,28 @@ services:
         state.backend: rocksdb
         state.backend.incremental: true
         AWS_REGION=us-east-1
-        AWS_ACCESS_KEY_ID=admin
-        AWS_SECRET_ACCESS_KEY=password
+        AWS_ACCESS_KEY_ID=${MINIO_ROOT_USER:-admin}
+        AWS_SECRET_ACCESS_KEY=${MINIO_ROOT_PASSWORD:-password}
         AWS_DEFAULT_REGION=us-east-1
         S3_ENDPOINT=http://minio:9000
         S3_PATH_STYLE_ACCESS=true
-        JAVA_TOOL_OPTIONS=-Daws.accessKeyId=admin -Daws.secretKey=password
+        JAVA_TOOL_OPTIONS=-Daws.accessKeyId=${MINIO_ROOT_USER:-admin} -Daws.secretKey=${MINIO_ROOT_PASSWORD:-password}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:18081"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
     networks:
       - iceberg_net
 
   taskmanager:
     container_name: taskmanager
     image: flink:1.18.1-scala_2.12-java11
+    restart: on-failure
     depends_on:
-      - jobmanager
+      jobmanager:
+        condition: service_healthy
     command: taskmanager
     environment:
       - |
@@ -121,34 +136,39 @@ services:
         state.backend: rocksdb
         state.backend.incremental: true
         AWS_REGION=us-east-1
-        AWS_ACCESS_KEY_ID=admin
-        AWS_SECRET_ACCESS_KEY=password
+        AWS_ACCESS_KEY_ID=${MINIO_ROOT_USER:-admin}
+        AWS_SECRET_ACCESS_KEY=${MINIO_ROOT_PASSWORD:-password}
         AWS_DEFAULT_REGION=us-east-1
         S3_ENDPOINT=http://minio:9000
         S3_PATH_STYLE_ACCESS=true
-        JAVA_TOOL_OPTIONS=-Daws.accessKeyId=admin -Daws.secretKey=password
-
+        JAVA_TOOL_OPTIONS=-Daws.accessKeyId=${MINIO_ROOT_USER:-admin} -Daws.secretKey=${MINIO_ROOT_PASSWORD:-password}
     networks:
       - iceberg_net
 
   sql-client:
     container_name: sql-client
+    build:
+      context: ./flink/sql-client/
     depends_on:
       jobmanager:
         condition: service_healthy
       taskmanager:
         condition: service_started
-    build:
-      context: ./flink/sql-client/
+      broker:
+        condition: service_healthy
+      mc:
+        condition: service_started
+      rest:
+        condition: service_started
     environment:
       FLINK_JOBMANAGER_HOST: jobmanager
       S3_ENDPOINT: http://minio:9000
       S3_PATH_STYLE_ACCESS: true
-      AWS_ACCESS_KEY_ID: admin
-      AWS_SECRET_ACCESS_KEY: password
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-admin}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-password}
       AWS_REGION: us-east-1
       AWS_DEFAULT_REGION: us-east-1
-      JAVA_TOOL_OPTIONS: -Daws.accessKeyId=admin -Daws.secretKey=password
+      JAVA_TOOL_OPTIONS: -Daws.accessKeyId=${MINIO_ROOT_USER:-admin} -Daws.secretKey=${MINIO_ROOT_PASSWORD:-password}
     volumes:
       - type: bind
         source: ${PWD}/flink/sql-client/flink-conf.yaml
@@ -165,12 +185,22 @@ services:
       - iceberg_net
 
   minio:
-    image: minio/minio
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
     container_name: minio
+    restart: on-failure
     environment:
-      - MINIO_ROOT_USER=admin
-      - MINIO_ROOT_PASSWORD=password
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-admin}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-password}
       - MINIO_DOMAIN=minio
+    healthcheck:                   # so mc/rest can wait for real readiness
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    volumes:
+      - minio_data:/data
+                                   # all lake data previously died with the container
     networks:
       iceberg_net:
         aliases:
@@ -179,35 +209,47 @@ services:
       - 9001:9001
       - 9000:9000
     command: ["server", "/data", "--console-address", ":9001"]
+
   mc:
-    depends_on:
-      - minio
-    image: minio/mc
+    image: minio/mc:RELEASE.2025-08-13T08-35-41Z
     container_name: mc
+    depends_on:
+      minio:
+        condition: service_healthy
     networks:
       - iceberg_net
     environment:
-      - AWS_ACCESS_KEY_ID=admin
-      - AWS_SECRET_ACCESS_KEY=password
+      - AWS_ACCESS_KEY_ID=${MINIO_ROOT_USER:-admin}
+      - AWS_SECRET_ACCESS_KEY=${MINIO_ROOT_PASSWORD:-password}
       - AWS_REGION=us-east-1
       - AWS_DEFAULT_REGION=us-east-1
+    #           on every restart; --ignore-existing makes creation idempotent instead
     entrypoint: >
       /bin/sh -c "
-      until (/usr/bin/mc config host add minio http://minio:9000 admin password) do echo '...waiting...' && sleep 1; done;
-      /usr/bin/mc rm -r --force minio/warehouse;
-      /usr/bin/mc mb minio/warehouse;
-      /usr/bin/mc policy set public minio/warehouse;
+      i=0;
+      until /usr/bin/mc alias set minio http://minio:9000 $${AWS_ACCESS_KEY_ID} $${AWS_SECRET_ACCESS_KEY}; do
+        i=$$((i+1));
+        if [ $$i -ge 30 ]; then echo 'FATAL: minio unreachable after 30 tries'; exit 1; fi;
+        echo '...waiting for minio...'; sleep 2;
+      done;
+      /usr/bin/mc mb --ignore-existing minio/warehouse &&
+      /usr/bin/mc anonymous set public minio/warehouse &&
+      echo 'bucket ready';
       tail -f /dev/null
       "
 
   rest:
-    image: tabulario/iceberg-rest
+    image: tabulario/iceberg-rest@sha256:3b7d31bdfec626b68e97531c9778a1b9119659e456fe28545a49f6aa6a9ce472
     container_name: iceberg-rest
+    restart: on-failure
+    depends_on:
+      minio:
+        condition: service_healthy
     ports:
       - 8181:8181
     environment:
-      - AWS_ACCESS_KEY_ID=admin
-      - AWS_SECRET_ACCESS_KEY=password
+      - AWS_ACCESS_KEY_ID=${MINIO_ROOT_USER:-admin}
+      - AWS_SECRET_ACCESS_KEY=${MINIO_ROOT_PASSWORD:-password}
       - AWS_REGION=us-east-1
       - CATALOG_WAREHOUSE=s3://warehouse/
       - CATALOG_IO__IMPL=org.apache.iceberg.aws.s3.S3FileIO
@@ -216,33 +258,42 @@ services:
       - iceberg_net
 
   trino:
-    image: trinodb/trino:latest
+    image: trinodb/trino:483
     container_name: trino
+    restart: on-failure
     networks:
       - iceberg_net
-    environment:
-      - TRINO_USER=admin
-      - TRINO_PASSWORD=admin
     ports:
       - 8080:8080
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/v1/info"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 45s
     depends_on:
-      - rest
-      - minio
+      rest:
+        condition: service_started
+      minio:
+        condition: service_healthy
     volumes:
       - ./trino/iceberg.properties:/etc/trino/catalog/iceberg.properties
 
   superset:
-      build:
-        context: ./superset
-      container_name: superset
-      networks:
-        - iceberg_net
-      environment:
-        - ADMIN_USERNAME=admin
-        - ADMIN_EMAIL=admin@superset.com
-        - ADMIN_PASSWORD=admin
-      ports:
-        - 8088:8088
+    build:
+      context: ./superset           # NOTE: pin `FROM apache/superset:6.1.0` in that Dockerfile [I4]
+    container_name: superset
+    restart: on-failure
+    networks:
+      - iceberg_net
+    environment:
+      - ADMIN_USERNAME=${SUPERSET_ADMIN_USERNAME:-admin}
+      - ADMIN_EMAIL=${SUPERSET_ADMIN_EMAIL:-admin@superset.com}
+      - ADMIN_PASSWORD=${SUPERSET_ADMIN_PASSWORD:-admin}
+    volumes:
+      - superset-data:/app/superset_home
+    ports:
+      - 8088:8088
 
 networks:
   iceberg_net:
