@@ -1,4 +1,4 @@
-**Real-Time Clickstream Pipeline (Kafka → Flink → Iceberg → Trino)**
+**Real-Time Clickstream Pipeline**
 ======================================================================================
 
 ![Docker](https://img.shields.io/badge/Docker-Enabled-blue?logo=docker)
