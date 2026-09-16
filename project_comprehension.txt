@@ -1,0 +1,20 @@
+What each piece is
+The producer is the "outside world" stand-in — a small Python script generating fake user events (page views, purchases...) with Faker and publishing them as JSON to Kafka. In a real company this would be your website's tracking code.
+
+Kafka is the front door: a durable, ordered log of events. Producers append; consumers read at their own pace. It decouples the systems generating data from the systems processing it — if Flink dies for an hour, events wait safely in the topic. ZooKeeper is Kafka's bookkeeper, storing cluster metadata (newer Kafka versions have removed this dependency, which tells you this project uses a slightly older setup).
+
+Flink is the stream processor — a program that runs forever, continuously reading from Kafka, filtering/transforming events, and writing them out. It's split into a jobmanager (the brain: coordinates, schedules, triggers checkpoints) and a taskmanager (the muscle: actually runs the tasks). The sql-client is neither — it's a one-shot courier that submits your SQL job and exits. Checkpoints are Flink's periodic "save game" snapshots; you saw they're also the moment data actually gets committed to storage (~every 10 seconds).
+
+MinIO is just storage — an S3 clone holding bytes in a bucket. It doesn't know what a table is. Iceberg is what turns those loose files into a table: a specification for organizing Parquet data files plus metadata files so that they behave like a database table — with schema, atomic commits, snapshots, and time travel. You saw its anatomy live in the bucket listing. The REST catalog is the index of tables — when anyone asks "where is db.clickstream_sink?", the catalog answers with a pointer to the current metadata file. That's how Flink and Trino agree on the same table without talking to each other.
+
+Trino (next step) is a query engine with no storage of its own — it reads Iceberg metadata, figures out which Parquet files matter, and runs distributed SQL over them.
+
+The big architectural idea tying it together: storage, processing, and querying are fully decoupled, connected only through open formats (Kafka topics, Iceberg tables). Any piece can be swapped without touching the others. That's "the modern data stack" in one sentence.
+
+What actually happened (your debugging log)
+Maven download failed during the sql-client image build — DNS resolution inside Docker Desktop's VM was broken. Fix: pointed the daemon at public DNS (8.8.8.8). Lesson: Docker Desktop on Linux runs in a VM with its own fragile networking.
+The warehouse bucket didn't exist — the mc init container was stuck in an infinite loop because its script uses mc config, a command removed from newer mc versions (the image isn't version-pinned). Fix: created the bucket manually. Lesson: unpinned dependencies rot; this is a real bug you could PR.
+The Flink job crash-looped 494 times — "No resolvable bootstrap urls" because the broker container had silently died: it timed out waiting for ZooKeeper during the slow cold start. We were misled for a bit because docker compose ps only shows living containers. Fix: started the broker again; the job self-healed on its next retry. Lessons: read the actual root exception (jobmanager logs, not taskmanager noise); depends_on guarantees start order, not readiness; retry loops are why the system recovered without you touching Flink at all.
+Notice none of the bugs were in "your" usage — all three were environment and orchestration issues. That's representative: in data engineering, the pipelines are often the easy part; making the infrastructure around them reliable is the job.
+
+
